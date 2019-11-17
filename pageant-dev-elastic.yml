@@ -1,0 +1,391 @@
+# Note that this is a YAML template, mainly so it can have inline comments.  It is transpiled to JSON by the command:
+#
+#    python -c "import sys, yaml, json; json.dump(yaml.load(open(\"$FilePath$\", 'r')), sys.stdout, indent=4)"
+#
+# Which can be configured as a file watcher in JetBrains IDEs or some other process as appropriate
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Creates elastic search cluster"
+
+Parameters:
+
+    # The name of the project
+    Project:
+        Type: "String"
+        Description: "The name of the project"
+
+    # Environment name
+    Environment:
+        Type: "String"
+        Description: "The name of the environment"
+
+    # Service name
+    Service:
+        Type: "String"
+        Default: "elasticsearch"
+        Description: "The name of the service"
+
+    EsInstanceSize:
+        Type: "String"
+        AllowedValues:
+          - t2.small.elasticsearch
+          - t2.medium.elasticsearch
+          - m3.medium.elasticsearch
+          - m3.large.elasticsearch
+          - m3.xlarge.elasticsearch
+          - m3.2xlarge.elasticsearch
+          - m4.large.elasticsearch
+          - m4.xlarge.elasticsearch
+          - m4.2xlarge.elasticsearch
+        Description: "Select ES Data instance size"
+        Default: "t2.small.elasticsearch"
+
+    EsInstanceCount:
+        Type: "Number"
+        MinValue: 1
+        MaxValue: 20
+        Description: "Number of ES Data instances"
+        Default: 1
+
+    EsMasterInstanceCount:
+        Type: "Number"
+        MinValue: 2
+        MaxValue: 10
+        Description: "Number of ES Master instances"
+        Default: 2
+
+    EsMasterInstanceSize:
+        Type: "String"
+        AllowedValues:
+          - t2.small.elasticsearch
+          - t2.medium.elasticsearch
+          - m3.medium.elasticsearch
+          - m3.large.elasticsearch
+          - m3.xlarge.elasticsearch
+          - m3.2xlarge.elasticsearch
+          - m4.large.elasticsearch
+          - m4.xlarge.elasticsearch
+          - m4.2xlarge.elasticsearch
+        Description: "Select ES Master instance size"
+        Default: "t2.small.elasticsearch"
+
+    MultiAz:
+        Type: "String"
+        AllowedValues: [ "true", "false" ]
+        Description: "Whether to create instances in multiple AZs. Requires at least 2 instances."
+        Default: "false"
+
+
+Mappings:
+  EsVolumeSize:
+    t2.small.elasticsearch:
+      VolumeSize: 35
+    t2.medium.elasticsearch:
+      VolumeSize: 35
+    m3.medium.elasticsearch:
+      VolumeSize: 100
+    m3.large.elasticsearch:
+      VolumeSize: 512
+    m3.xlarge.elasticsearch:
+      VolumeSize: 512
+    m3.2xlarge.elasticsearch:
+      VolumeSize: 512
+    m4.large.elasticsearch:
+      VolumeSize: 512
+    m4.xlarge.elasticsearch:
+      VolumeSize: 1024
+    m4.2xlarge.elasticsearch:
+      VolumeSize: 1536
+
+
+Metadata:
+    "AWS::CloudFormation::Interface":
+        ParameterGroups: [
+            {
+                Label: { default: "Definition" },
+                Parameters: [ "Project", "Environment", "Service" ]
+            },
+            {
+                Label: { default: "Configuration" },
+                Parameters: [ "EsInstanceSize", "EsInstanceCount",
+                 "EsMasterInstanceSize", "EsMasterInstanceCount", "MultiAz" ]
+            }
+        ]
+        ParameterLabels:
+            Project: { default: "Project" }
+            Environment: { default: "Environment" }
+            Service: { default: "Service" }
+            MultiAz: { default: "MultiAz" }
+
+Resources:
+
+    ##########################################################################################################
+    ## ES
+    ##########################################################################################################
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Project}-${Environment}-${Service}-lambda-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [lambda.amazonaws.com]
+          Action:
+          - "sts:AssumeRole"
+      Policies:
+      - PolicyName: "logs-es-access"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action:
+            - "logs:CreateLogGroup"
+            - "logs:CreateLogStream"
+            - "logs:PutLogEvents"
+            Resource: "arn:aws:logs:*:*:*"
+          - Effect: "Allow"
+            Action:
+            - "es:ESHttpPost"
+            Resource: !Sub "arn:aws:es:*:${AWS::AccountId}:*"
+
+  # LambdaInvokePermissionEuWest1:
+  #   Type: "AWS::Lambda::Permission"
+  #   Properties:
+  #     FunctionName: !GetAtt "CloudWatchToEsLambda.Arn"
+  #     Action: "lambda:InvokeFunction"
+  #     Principal: "logs.eu-west-1.amazonaws.com"
+  #     SourceAccount: !Ref AWS::AccountId
+
+  LambdaInvokePermissionUsEast1:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt "CloudWatchToEsLambda.Arn"
+      Action: "lambda:InvokeFunction"
+      Principal: "logs.us-east-1.amazonaws.com"
+      SourceAccount: !Ref AWS::AccountId
+
+  CloudWatchToEsLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Environment:
+        Variables:
+          EsEndpoint: !Sub "${ElasticsearchDomain60.DomainEndpoint}"
+      Code:
+        S3Bucket: pageant-dev-regional-infra
+        S3Key: lambdas/cloudwatch-to-elasticsearch.js.zip
+      Handler: "cloudwatch-to-elasticsearch.handler"
+      Description: "CloudWatch Logs to Amazon ES streaming"
+      Runtime: "nodejs8.10"
+      Timeout: "30"
+      Role: !GetAtt LambdaRole.Arn
+      FunctionName: pageant-dev01-cloudwatch-es-logs
+
+  ElasticsearchDomain60:
+    Type: "AWS::Elasticsearch::Domain"
+    Properties:
+      ElasticsearchVersion: "6.0"
+      ElasticsearchClusterConfig:
+        DedicatedMasterEnabled: "true"
+        DedicatedMasterType: { Ref: "EsMasterInstanceSize" }
+        DedicatedMasterCount: { Ref: "EsMasterInstanceCount" }
+        InstanceCount: { Ref: "EsInstanceCount" }
+        ZoneAwarenessEnabled: { Ref: "MultiAz" }
+        InstanceType: { Ref: "EsInstanceSize" }
+      EBSOptions:
+        EBSEnabled: true
+        Iops: 0
+        VolumeSize: { "Fn::FindInMap" : [ "EsVolumeSize", { Ref: "EsInstanceSize" }, "VolumeSize" ] }
+        VolumeType: "gp2"
+      SnapshotOptions:
+        AutomatedSnapshotStartHour: "0"
+      AccessPolicies:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Sid: ""
+            Principal:
+              AWS: "*"
+            Action: "es:*"
+            Condition:
+              IpAddress: {
+                "aws:SourceIp": [
+                  "213.86.221.182/32", #office
+                  "52.210.116.189/32", #VPN
+                ]
+              }
+            Resource: !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/*"
+      AdvancedOptions:
+        rest.action.multi.allow_explicit_index: "true"
+      Tags: [
+          { Key: "Management", Value: "managed" },
+          { Key: "Project", Value: { Ref: "Project" } },
+          { Key: "Environment", Value: { Ref: "Environment" } },
+          { Key: "Service", Value: { Ref: "Service" } }
+      ]
+
+    ##########################################################################################################
+    ## S3
+    ##########################################################################################################
+
+  LambdaSnapshotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Project}-${Environment}-${Service}-snapshot-lambda-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [lambda.amazonaws.com]
+          Action:
+          - "sts:AssumeRole"
+      Policies:
+      - PolicyName: "es-devenv-snapshot-access"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action:
+            - "*"
+            Resource: !Sub "arn:aws:es:*:${AWS::AccountId}:*"
+
+  SnapshotS3Bucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub "devenvironment-pageant-elasticsearch-${AWS::Region}"
+      Tags: [
+        { Key: "Management", Value: "managed" },
+        { Key: "Project", Value: "pageant" },
+        { Key: "Environment", Value: "global" },
+        { Key: "Description", Value: "pageant-devenv-elastic-search snapshot storage bucket" }
+      ]
+    # Don't delete this if we accidentally delete the stack (which would fail anyway)
+    DeletionPolicy : "Retain"
+
+  SnapshotS3AccessRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [
+          {
+            Effect: "Allow",
+            Principal: {"Service": "es.amazonaws.com"},
+            Action: "sts:AssumeRole"
+          }
+        ]
+      Policies: [
+        {
+          PolicyName: "pageant-devenv-es-s3-snapshot-role",
+          PolicyDocument: {
+            Version: "2012-10-17",
+            Statement: [
+              {
+                "Action":[
+                  "s3:ListBucket"
+                ],
+                "Effect":"Allow",
+                "Resource":[
+                  !Sub "arn:aws:s3:::${SnapshotS3Bucket}"
+                ]
+              },
+              {
+                "Action":[
+                  "s3:GetObject",
+                  "s3:PutObject",
+                  "s3:DeleteObject",
+                  "iam:PassRole"
+                ],
+                "Effect":"Allow",
+                "Resource":[
+                  !Sub "arn:aws:s3:::${SnapshotS3Bucket}/*"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+      RoleName: { "Fn::Join": [ "", [ "pageant-devenv-es-s3-snapshot-role-", {Ref: "AWS::Region"} ] ] }
+
+  SnapshotS3AccessRoleNew:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [
+          {
+            Effect: "Allow",
+            Principal: {"Service": "es.amazonaws.com"},
+            Action: "sts:AssumeRole"
+          }
+        ]
+      Policies: [
+        {
+          PolicyName: "pageant-devenv-es-s3-snapshot-role",
+          PolicyDocument: {
+            Version: "2012-10-17",
+            Statement: [
+              {
+                "Action":[
+                  "s3:ListBucket"
+                ],
+                "Effect":"Allow",
+                "Resource":[
+                  !Sub "arn:aws:s3:::${SnapshotS3Bucket}"
+                ]
+              },
+              {
+                "Action":[
+                  "s3:GetObject",
+                  "s3:PutObject",
+                  "s3:DeleteObject",
+                  "iam:PassRole"
+                ],
+                "Effect":"Allow",
+                "Resource":[
+                  !Sub "arn:aws:s3:::${SnapshotS3Bucket}/*"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+      RoleName: { "Fn::Join": [ "", [ "pageant-devenv-es-s3-snapshot-new", {Ref: "AWS::Region"} ] ] }
+
+  SnapshotESLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Environment:
+        Variables:
+          ENDPOINT: !Sub "${ElasticsearchDomain60.DomainEndpoint}"
+          AWS_SNAPSHOT_ROLE: !GetAtt SnapshotS3AccessRole.Arn
+          AWS_SNAPSHOT_BUCKET: !Sub "${SnapshotS3Bucket}"
+          AWS_SNAPSHOT_REPOSITORY: "pageant_devenv_es_snapshot_s3"
+          SNAPSHOT_NAME_PREFIX: "pageant_"
+          ES_INDEX_TTL_DAYS: "60"
+      Code:
+        S3Bucket: pageant-dev-regional-infra
+        S3Key: lambdas/elasticsearch-snapshot.js.zip
+      Handler: "elasticsearch-snapshot.handler"
+      Description: "Snapshot elasticsearch to s3 bucket"
+      Runtime: "nodejs8.10"
+      Timeout: "30"
+      Role: !GetAtt LambdaSnapshotRole.Arn
+      FunctionName: pageant-dev01-snapshot-es
+
+  SnapshotScheduler:
+    Type: "AWS::Events::Rule"
+    Properties:
+      ScheduleExpression: "rate(1 day)"
+      Targets:
+        -
+          Arn: !GetAtt SnapshotESLambda.Arn
+          Id: "SnapshotScheduler"
+
+  SnapshotSchedulerInvokeLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt SnapshotESLambda.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt SnapshotScheduler.Arn
