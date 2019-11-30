@@ -5,9 +5,20 @@
 
 trigger:
 - master
-
+- task: Ansible@0
+  inputs:
+    ansibleInterface: 'agentMachine'
+    playbookPathOnAgentMachine: 'test.yaml'
+    inventoriesAgentMachine: 'noInventory'
 pool:
   vmImage: 'ubuntu-latest'
+- task: Ant@1
+  inputs:
+    buildFile: 'build.xml'
+    options: 
+    publishJUnitResults: true
+    testResultsFiles: '**/TEST-*.xml'
+    javaHomeOption: 'JDKVersion'
 
 steps:
 - script: echo Hello, world!
